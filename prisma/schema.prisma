@@ -1,0 +1,133 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Project {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  slug        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  tools     Tool[]
+  scenarios Scenario[]
+
+  @@map("projects")
+}
+
+enum ToolKind {
+  HTTP
+  MCP
+}
+
+model Tool {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  projectId String   @map("project_id") @db.Uuid
+  slug      String
+  kind      ToolKind @default(HTTP)
+  baseUrl   String   @map("base_url")
+  timeoutMs Int      @default(30000) @map("timeout_ms")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  traces  Trace[]
+
+  @@unique([projectId, slug])
+  @@map("tools")
+}
+
+model Scenario {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  projectId  String   @map("project_id") @db.Uuid
+  name       String
+  sourceYaml String   @map("source_yaml") @db.Text
+  definition Json
+  checksum   String
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runs    Run[]
+
+  @@unique([projectId, name])
+  @@map("scenarios")
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model Run {
+  id               String    @id @default(uuid(7)) @db.Uuid
+  scenarioId       String    @map("scenario_id") @db.Uuid
+  status           RunStatus @default(PENDING)
+  seed             Int
+  scenarioSnapshot Json      @map("scenario_snapshot")
+  startedAt        DateTime? @map("started_at") @db.Timestamptz(3)
+  finishedAt       DateTime? @map("finished_at") @db.Timestamptz(3)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  scenario Scenario @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  traces   Trace[]
+
+  @@index([scenarioId, createdAt])
+  @@map("runs")
+}
+
+model Trace {
+  id       String @id @default(uuid(7)) @db.Uuid
+  runId    String @map("run_id") @db.Uuid
+  toolId   String @map("tool_id") @db.Uuid
+  sequence Int
+
+  method         String
+  path           String
+  query          String?
+  requestHeaders Json    @map("request_headers")
+  requestBody    String? @map("request_body") @db.Text
+
+  responseStatus  Int?    @map("response_status")
+  responseHeaders Json?   @map("response_headers")
+  responseBody    String? @map("response_body") @db.Text
+  bodyTruncated   Boolean @default(false) @map("body_truncated")
+
+  startedAt          DateTime @map("started_at") @db.Timestamptz(3)
+  durationMs         Int      @map("duration_ms")
+  upstreamDurationMs Int?     @map("upstream_duration_ms")
+
+  errorCode String? @map("error_code")
+
+  run    Run          @relation(fields: [runId], references: [id], onDelete: Cascade)
+  tool   Tool         @relation(fields: [toolId], references: [id], onDelete: Restrict)
+  faults TraceFault[]
+
+  @@unique([runId, sequence])
+  @@index([toolId])
+  @@map("traces")
+}
+
+model TraceFault {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  traceId   String   @map("trace_id") @db.Uuid
+  ruleId    String   @map("rule_id")
+  faultType String   @map("fault_type")
+  config    Json
+  appliedAt DateTime @default(now()) @map("applied_at") @db.Timestamptz(3)
+
+  trace Trace @relation(fields: [traceId], references: [id], onDelete: Cascade)
+
+  @@index([traceId])
+  @@index([faultType])
+  @@map("trace_faults")
+}

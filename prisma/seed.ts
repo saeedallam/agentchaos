@@ -42,7 +42,8 @@ async function main() {
     },
   });
 
-  const emailTool = await prisma.tool.upsert({
+  // Second tool, also pointing to the fake upstream
+  await prisma.tool.upsert({
     where: { projectId_slug: { projectId: project.id, slug: 'email' } },
     update: {},
     create: {
@@ -79,7 +80,9 @@ async function main() {
     },
   });
 
-  console.log(`Seeded: project "${project.slug}", tool "${tool.slug}", run ${DEMO_RUN_ID}`);
+  console.log(
+    `Seeded: project "${project.slug}", tool "${tool.slug}", run ${DEMO_RUN_ID}`,
+  );
 }
 
 try {

@@ -48,21 +48,43 @@ export class ProxyService {
     }
 
     // 3) Forward to the real tool
+    let result: ProxyResult;
     try {
       const upstreamRes = await fetch(tool.baseUrl + request.path, {
         method: request.method,
         signal: AbortSignal.timeout(tool.timeoutMs),
       });
 
-      return {
+      result = {
         status: upstreamRes.status,
         contentType: upstreamRes.headers.get('content-type') ?? 'text/plain',
         body: await upstreamRes.text(),
         durationMs: Date.now() - startedAt,
       };
     } catch {
-      return errorResult(502, 'UPSTREAM_UNREACHABLE', startedAt);
+      result = errorResult(502, 'UPSTREAM_UNREACHABLE', startedAt);
     }
+
+    // 4) Write it in the notebook: one trace per request
+    const sequence =
+      (await this.prisma.trace.count({ where: { runId: run.id } })) + 1;
+
+    await this.prisma.trace.create({
+      data: {
+        runId: request.runId,
+        toolId: tool.id,
+        sequence,
+        method: request.method,
+        path: request.path,
+        requestHeaders: {},
+        responseStatus: result.status,
+        responseBody: result.body,
+        startedAt: new Date(startedAt),
+        durationMs: result.durationMs,
+      },
+    });
+
+    return result;
   }
 }
 

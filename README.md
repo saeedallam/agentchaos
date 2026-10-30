@@ -1,132 +1,112 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# AgentChaos
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Chaos testing for AI agents.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+AgentChaos sits as a proxy between an AI agent and the tools it calls
+(HTTP APIs, and later MCP servers). It forwards each call to the real
+tool, injects faults defined in a YAML scenario, records every call as a
+trace, and scores how the agent behaved.
 
-## Description
+> Status: early development. Phase 1 (HTTP proxy, first faults, YAML
+> scenarios) is in progress. Nothing here is stable yet.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Why
 
-## Project setup
+Agents look great in demos, where every tool answers instantly and
+correctly. In production, APIs time out, rate limit, and return broken
+data. AgentChaos answers the question nobody tests: what does your agent
+do when its tools fail?
 
-```bash
-$ npm install
+- Does it retry sensibly, or give up, or retry forever?
+- Does it get stuck in a loop?
+- How many calls and tokens does it burn?
+- Does it claim success when it actually failed?
+- Does it obey instructions injected into tool output?
+
+## How it works
+
+```
+Agent  -->  AgentChaos proxy  -->  Real tool
+                 |
+                 +-- injects faults from a YAML scenario
+                 +-- records every call as a trace (PostgreSQL)
 ```
 
-## Compile and run the project
+A scenario looks like this (the format is still evolving):
 
-```bash
-# development
-$ npm run start
+```yaml
+version: 1
+name: flaky-weather
+seed: 42 # same seed = same faults in the same places
 
-# watch mode
-$ npm run start:dev
+faults:
+  - id: slow-forecast
+    type: latency
+    target: { tool: weather, path: '/forecast*' }
+    probability: 0.5
+    config: { delayMs: 2000 }
 
-# production mode
-$ npm run start:prod
+  - id: rate-limited
+    type: http_error
+    target: { tool: weather }
+    probability: 0.2
+    config: { status: 429 }
 ```
 
-## Run tests
+## Getting started (development)
+
+Requirements:
+
+- Node.js 22.12 or newer
+- npm 11 or newer (npm 10.9 crashes while installing, see
+  [ADR 0001](docs/adr/0001-use-esm-and-vitest.md))
+- Docker with Docker Compose
 
 ```bash
-# unit tests
-$ npm run test
+# 1. Install dependencies (also generates the Prisma client)
+npm install
 
-# e2e tests
-$ npm run test:e2e
+# 2. Create your local environment file
+cp .env.example .env
 
-# test coverage
-$ npm run test:cov
+# 3. Start PostgreSQL (runs on 127.0.0.1:5433)
+docker compose up -d
+
+# 4. Apply database migrations
+npm run db:migrate
+
+# 5. Start the app in watch mode
+npm run start:dev
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Check that the app and the database are up:
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+curl http://localhost:3000/health
+# {"status":"ok","database":"up"}
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+## Useful scripts
 
-## Observability
+| Script                | What it does                                 |
+| --------------------- | -------------------------------------------- |
+| `npm run start:dev`   | Start the app and restart on file changes    |
+| `npm run db:migrate`  | Create and apply database migrations         |
+| `npm run db:generate` | Regenerate the Prisma client                 |
+| `npm test`            | Run unit tests (Vitest)                      |
+| `npm run test:e2e`    | Run end-to-end tests (needs the database up) |
+| `npm run lint`        | Lint the code (oxlint)                       |
+| `npm run format`      | Format the code (Prettier)                   |
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+## Tech stack
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+NestJS 12, TypeScript (ESM), PostgreSQL 18, Prisma 7, Vitest, Docker
+Compose. Redis and BullMQ will be added for background runs.
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+## Architecture decisions
 
-To add it to this project, run this and approve the code it prints at [observe.nestjs.com/link](https://observe.nestjs.com/link) - signing up for free if you have no account:
-
-```bash
-$ npx @nestjs/observe link
-```
-
-It installs `@nestjs/observe`, wires it into `AppModule` and `main.ts`, and writes the app key and secret into `.env`, which every `nest start` script (`start`, `start:dev`, `start:debug`) then loads. In production, set `OBSERVE_APP_KEY` and `OBSERVE_APP_SECRET` in the environment instead.
-
-Or do it by hand:
-
-```bash
-$ npm install @nestjs/observe
-```
-
-Then follow the [setup guide](https://docs.nestjs.com/observability/sdk) - it takes a single import and an app key.
-
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+Important decisions are recorded as ADRs in [`docs/adr`](docs/adr).
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Not decided yet. Until a license is added, this code is not open source.

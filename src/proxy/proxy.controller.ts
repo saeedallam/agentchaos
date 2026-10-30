@@ -1,4 +1,11 @@
-import { All, Controller, Req, Res } from '@nestjs/common';
+import {
+  All,
+  Controller,
+  Param,
+  ParseUUIDPipe,
+  Req,
+  Res,
+} from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { ProxyService } from './proxy.service.js';
 
@@ -6,14 +13,27 @@ import { ProxyService } from './proxy.service.js';
 export class ProxyController {
   constructor(private readonly proxy: ProxyService) {}
 
-  @All('*path')
-  async forward(@Req() req: Request, @Res() res: Response) {
-    const path = req.url.replace(/^\/proxy/, '');
-    const result = await this.proxy.forward({ method: req.method, path });
+  // /proxy/:runId/:toolSlug/<path the real tool receives>
+  @All(':runId/:toolSlug/*path')
+  async forward(
+    @Param('runId', ParseUUIDPipe) runId: string,
+    @Param('toolSlug') toolSlug: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const prefix = `/proxy/${runId}/${toolSlug}`;
+    const path = req.url.slice(prefix.length);
+
+    const result = await this.proxy.forward({
+      runId,
+      toolSlug,
+      method: req.method,
+      path,
+    });
 
     res.status(result.status).type(result.contentType).send(result.body);
     console.log(
-      `${req.method} ${path} -> ${result.status} in ${result.durationMs}ms`,
+      `${req.method} [${toolSlug}] ${path} -> ${result.status} in ${result.durationMs}ms`,
     );
   }
 }

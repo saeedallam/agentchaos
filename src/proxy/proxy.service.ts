@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-
-// Temporary: a later step reads this from the tools table.
-const UPSTREAM = 'http://localhost:5000';
+import { PrismaService } from '../common/prisma/prisma.service.js';
 
 export interface ProxyRequest {
+  runId: string;
+  toolSlug: string;
   method: string;
   path: string;
 }
@@ -17,13 +17,41 @@ export interface ProxyResult {
 
 @Injectable()
 export class ProxyService {
+  constructor(private readonly prisma: PrismaService) {}
+
   async forward(request: ProxyRequest): Promise<ProxyResult> {
     const startedAt = Date.now();
 
+    // 1) Which run is this request part of?
+    const run = await this.prisma.run.findUnique({
+      where: { id: request.runId },
+      include: { scenario: { select: { projectId: true } } },
+    });
+    if (!run) {
+      return errorResult(404, 'RUN_NOT_FOUND', startedAt);
+    }
+    if (run.status !== 'RUNNING') {
+      return errorResult(409, 'RUN_NOT_RUNNING', startedAt);
+    }
+
+    // 2) Which tool is the agent calling?
+    const tool = await this.prisma.tool.findUnique({
+      where: {
+        projectId_slug: {
+          projectId: run.scenario.projectId,
+          slug: request.toolSlug,
+        },
+      },
+    });
+    if (!tool) {
+      return errorResult(404, 'TOOL_NOT_FOUND', startedAt);
+    }
+
+    // 3) Forward to the real tool
     try {
-      const upstreamRes = await fetch(UPSTREAM + request.path, {
+      const upstreamRes = await fetch(tool.baseUrl + request.path, {
         method: request.method,
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(tool.timeoutMs),
       });
 
       return {
@@ -33,12 +61,20 @@ export class ProxyService {
         durationMs: Date.now() - startedAt,
       };
     } catch {
-      return {
-        status: 502,
-        contentType: 'application/json',
-        body: JSON.stringify({ error: 'UPSTREAM_UNREACHABLE' }),
-        durationMs: Date.now() - startedAt,
-      };
+      return errorResult(502, 'UPSTREAM_UNREACHABLE', startedAt);
     }
   }
+}
+
+function errorResult(
+  status: number,
+  error: string,
+  startedAt: number,
+): ProxyResult {
+  return {
+    status,
+    contentType: 'application/json',
+    body: JSON.stringify({ error }),
+    durationMs: Date.now() - startedAt,
+  };
 }

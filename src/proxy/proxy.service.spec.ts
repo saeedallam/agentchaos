@@ -8,6 +8,10 @@ function fakePrisma(options: { run?: unknown; tool?: unknown }) {
   return {
     run: { findUnique: vi.fn().mockResolvedValue(options.run ?? null) },
     tool: { findUnique: vi.fn().mockResolvedValue(options.tool ?? null) },
+    trace: {
+      count: vi.fn().mockResolvedValue(0),
+      create: vi.fn().mockResolvedValue({}),
+    },
   } as unknown as PrismaService;
 }
 

@@ -1,3 +1,6 @@
+// Load .env before anything else reads process.env.
+// In production, set the variables in the environment instead.
+import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module.js';
 

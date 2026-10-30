@@ -42,6 +42,16 @@ async function main() {
     },
   });
 
+  const emailTool = await prisma.tool.upsert({
+    where: { projectId_slug: { projectId: project.id, slug: 'email' } },
+    update: {},
+    create: {
+      projectId: project.id,
+      slug: 'email',
+      baseUrl: 'http://localhost:5000',
+    },
+  });
+
   // 3) Scenario: no faults yet
   const scenario = await prisma.scenario.upsert({
     where: { projectId_name: { projectId: project.id, name: 'no-faults' } },

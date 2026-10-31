@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import { FaultRegistry } from '../faults/fault-registry.js';
+import { planFaults, type PlannedFault } from '../faults/fault-planner.js';
 import { TraceRecorder } from '../traces/trace.recorder.js';
 import { TargetProvider } from './target.provider.js';
 import { UpstreamClient } from './upstream.client.js';
@@ -24,6 +26,7 @@ export class ProxyService {
     private readonly targets: TargetProvider,
     private readonly upstream: UpstreamClient,
     private readonly recorder: TraceRecorder,
+    private readonly faults: FaultRegistry,
   ) {}
 
   async forward(request: ProxyRequest): Promise<ProxyResult> {
@@ -44,35 +47,71 @@ export class ProxyService {
       return errorResult(404, 'TOOL_NOT_FOUND', startedAt);
     }
 
-    // 3) Forward to the real tool
-    let result: ProxyResult;
-    try {
-      const response = await this.upstream.send(
-        tool.baseUrl + request.path,
-        request.method,
-        tool.timeoutMs,
-      );
+    // 3) Which faults happen on this request? (the rule sheet)
+    const sequence = await this.recorder.nextSequence(run.id);
+    const planned = planFaults(run.faultRules, {
+      toolSlug: request.toolSlug,
+      path: request.path,
+      seed: run.seed,
+      sequence,
+    });
 
-      result = {
-        status: response.status,
-        contentType: response.contentType,
-        body: response.body,
-        durationMs: Date.now() - startedAt,
-      };
-    } catch {
-      result = errorResult(502, 'UPSTREAM_UNREACHABLE', startedAt);
+    // 4) Apply them, card by card
+    const applied: PlannedFault[] = [];
+    let result: ProxyResult | undefined;
+    for (const fault of planned) {
+      const card = this.faults.get(fault.type);
+      if (!card) {
+        continue; // unknown type: scenario validation will reject these later
+      }
+
+      const outcome = await card.apply(fault.config);
+      applied.push(fault);
+
+      if (outcome.kind === 'respond') {
+        // The card answers instead of the kitchen.
+        result = {
+          status: outcome.status,
+          contentType: 'application/json',
+          body: outcome.body,
+          durationMs: Date.now() - startedAt,
+        };
+        break;
+      }
     }
 
-    // 4) Write it in the notebook: one trace per request
+    // 5) Forward to the real tool, unless a card already answered
+    if (!result) {
+      try {
+        const response = await this.upstream.send(
+          tool.baseUrl + request.path,
+          request.method,
+          tool.timeoutMs,
+        );
+
+        result = {
+          status: response.status,
+          contentType: response.contentType,
+          body: response.body,
+          durationMs: Date.now() - startedAt,
+        };
+      } catch {
+        result = errorResult(502, 'UPSTREAM_UNREACHABLE', startedAt);
+      }
+    }
+
+    // 6) Write it in the notebook, with the faults that were applied
     await this.recorder.record({
       runId: run.id,
       toolId: tool.id,
+      sequence,
       method: request.method,
       path: request.path,
       responseStatus: result.status,
       responseBody: result.body,
       startedAt,
       durationMs: result.durationMs,
+      faults: applied,
     });
 
     return result;

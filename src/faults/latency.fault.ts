@@ -9,7 +9,7 @@ export class LatencyFault implements FaultPlugin {
     const delayMs = Number(config.delayMs ?? 1000);
 
     await sleep(delayMs);
-    
+
     return { kind: 'continue' };
   }
 }

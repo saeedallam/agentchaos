@@ -1,6 +1,5 @@
 import type { FaultOutcome, FaultPlugin } from './fault.js';
 
-// Answers with an HTTP error instead of calling the real tool.
 export class HttpErrorFault implements FaultPlugin {
   readonly type = 'http_error';
 

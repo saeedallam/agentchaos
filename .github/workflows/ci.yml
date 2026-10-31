@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: agentchaos
+          POSTGRES_PASSWORD: agentchaos
+          POSTGRES_DB: agentchaos
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U agentchaos -d agentchaos"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://agentchaos:agentchaos@127.0.0.1:5433/agentchaos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Migrate database
+        run: npm run db:deploy
+
+      - name: End-to-end tests
+        run: npm run test:e2e
+
+      - name: Build
+        run: npm run build

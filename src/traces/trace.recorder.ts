@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service.js';
 import type { PlannedFault } from '../faults/fault-planner.js';
 import type { Prisma } from '../generated/prisma/client.js';
+import { redactHeaders, redactQuery, truncateBody } from './trace-policy.js';
 
 export interface TraceInput {
   runId: string;
@@ -9,27 +10,31 @@ export interface TraceInput {
   sequence: number;
   method: string;
   path: string;
-  responseStatus: number;
-  responseBody: string;
+  query: string | null;
+  requestHeaders: Record<string, string>;
+  requestBody: string | null;
+  responseStatus: number | null;
+  responseHeaders: Record<string, string> | null;
+  responseBody: string | null;
   startedAt: number;
   durationMs: number;
+  upstreamDurationMs: number | null;
+  errorCode: string | null;
   faults: PlannedFault[];
 }
 
-// The notebook writer: saves one trace per proxied request,
-// plus one trace_faults row for every fault that was applied.
 @Injectable()
 export class TraceRecorder {
   constructor(private readonly prisma: PrismaService) {}
 
-  // The number of the next request in this run.
-  // count + 1 can collide under concurrent requests; the unique
-  // (run_id, sequence) index rejects the duplicate. Fix later.
   async nextSequence(runId: string): Promise<number> {
     return (await this.prisma.trace.count({ where: { runId } })) + 1;
   }
 
   async record(input: TraceInput): Promise<void> {
+    const requestBody = truncateBody(input.requestBody);
+    const responseBody = truncateBody(input.responseBody);
+
     await this.prisma.trace.create({
       data: {
         runId: input.runId,
@@ -37,11 +42,19 @@ export class TraceRecorder {
         sequence: input.sequence,
         method: input.method,
         path: input.path,
-        requestHeaders: {},
+        query: redactQuery(input.query),
+        requestHeaders: redactHeaders(input.requestHeaders),
+        requestBody: requestBody.body,
         responseStatus: input.responseStatus,
-        responseBody: input.responseBody,
+        responseHeaders: input.responseHeaders
+          ? redactHeaders(input.responseHeaders)
+          : undefined,
+        responseBody: responseBody.body,
+        bodyTruncated: requestBody.truncated || responseBody.truncated,
         startedAt: new Date(input.startedAt),
         durationMs: input.durationMs,
+        upstreamDurationMs: input.upstreamDurationMs,
+        errorCode: input.errorCode,
         faults: {
           create: input.faults.map((fault) => ({
             ruleId: fault.ruleId,

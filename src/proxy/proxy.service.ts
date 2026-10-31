@@ -3,23 +3,27 @@ import { FaultRegistry } from '../faults/fault-registry.js';
 import { planFaults, type PlannedFault } from '../faults/fault-planner.js';
 import { TraceRecorder } from '../traces/trace.recorder.js';
 import { TargetProvider } from './target.provider.js';
-import { UpstreamClient } from './upstream.client.js';
+import { UpstreamClient, UpstreamError } from './upstream.client.js';
 
 export interface ProxyRequest {
   runId: string;
   toolSlug: string;
   method: string;
   path: string;
+  query: string | null;
+  headers: Record<string, string>;
+  body: Buffer | null;
 }
 
 export interface ProxyResult {
   status: number;
-  contentType: string;
+  headers: Record<string, string>;
   body: string;
   durationMs: number;
 }
 
-// The manager: decides the order of steps and hands each one to a helper.
+const JSON_HEADERS = { 'content-type': 'application/json' };
+
 @Injectable()
 export class ProxyService {
   constructor(
@@ -32,7 +36,6 @@ export class ProxyService {
   async forward(request: ProxyRequest): Promise<ProxyResult> {
     const startedAt = Date.now();
 
-    // 1) Which run is this request part of?
     const run = await this.targets.findRun(request.runId);
     if (!run) {
       return errorResult(404, 'RUN_NOT_FOUND', startedAt);
@@ -41,13 +44,11 @@ export class ProxyService {
       return errorResult(409, 'RUN_NOT_RUNNING', startedAt);
     }
 
-    // 2) Which tool is the agent calling?
     const tool = await this.targets.findTool(run.projectId, request.toolSlug);
     if (!tool) {
       return errorResult(404, 'TOOL_NOT_FOUND', startedAt);
     }
 
-    // 3) Which faults happen on this request? (the rule sheet)
     const sequence = await this.recorder.nextSequence(run.id);
     const planned = planFaults(run.faultRules, {
       toolSlug: request.toolSlug,
@@ -56,23 +57,21 @@ export class ProxyService {
       sequence,
     });
 
-    // 4) Apply them, card by card
     const applied: PlannedFault[] = [];
     let result: ProxyResult | undefined;
     for (const fault of planned) {
       const card = this.faults.get(fault.type);
       if (!card) {
-        continue; // unknown type: scenario validation will reject these later
+        continue;
       }
 
       const outcome = await card.apply(fault.config);
       applied.push(fault);
 
       if (outcome.kind === 'respond') {
-        // The card answers instead of the kitchen.
         result = {
           status: outcome.status,
-          contentType: 'application/json',
+          headers: JSON_HEADERS,
           body: outcome.body,
           durationMs: Date.now() - startedAt,
         };
@@ -80,37 +79,54 @@ export class ProxyService {
       }
     }
 
-    // 5) Forward to the real tool, unless a card already answered
+    let upstreamDurationMs: number | null = null;
+    let errorCode: string | null = null;
     if (!result) {
+      const url =
+        tool.baseUrl +
+        request.path +
+        (request.query ? `?${request.query}` : '');
       try {
-        const response = await this.upstream.send(
-          tool.baseUrl + request.path,
-          request.method,
-          tool.timeoutMs,
-        );
-
+        const response = await this.upstream.send({
+          url,
+          method: request.method,
+          headers: request.headers,
+          body: request.body,
+          timeoutMs: tool.timeoutMs,
+        });
+        upstreamDurationMs = response.durationMs;
         result = {
           status: response.status,
-          contentType: response.contentType,
+          headers: response.headers,
           body: response.body,
           durationMs: Date.now() - startedAt,
         };
-      } catch {
-        result = errorResult(502, 'UPSTREAM_UNREACHABLE', startedAt);
+      } catch (error) {
+        if (!(error instanceof UpstreamError)) {
+          throw error;
+        }
+        errorCode = error.code;
+        const status = error.code === 'UPSTREAM_TIMEOUT' ? 504 : 502;
+        result = errorResult(status, error.code, startedAt);
       }
     }
 
-    // 6) Write it in the notebook, with the faults that were applied
     await this.recorder.record({
       runId: run.id,
       toolId: tool.id,
       sequence,
       method: request.method,
       path: request.path,
+      query: request.query,
+      requestHeaders: request.headers,
+      requestBody: request.body ? request.body.toString('utf8') : null,
       responseStatus: result.status,
+      responseHeaders: result.headers,
       responseBody: result.body,
       startedAt,
       durationMs: result.durationMs,
+      upstreamDurationMs,
+      errorCode,
       faults: applied,
     });
 
@@ -125,7 +141,7 @@ function errorResult(
 ): ProxyResult {
   return {
     status,
-    contentType: 'application/json',
+    headers: JSON_HEADERS,
     body: JSON.stringify({ error }),
     durationMs: Date.now() - startedAt,
   };

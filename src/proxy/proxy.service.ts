@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service.js';
+import { UpstreamClient } from './upstream.client.js';
 
 export interface ProxyRequest {
   runId: string;
@@ -17,7 +18,10 @@ export interface ProxyResult {
 
 @Injectable()
 export class ProxyService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly upstream: UpstreamClient,
+  ) {}
 
   async forward(request: ProxyRequest): Promise<ProxyResult> {
     const startedAt = Date.now();
@@ -50,15 +54,16 @@ export class ProxyService {
     // 3) Forward to the real tool
     let result: ProxyResult;
     try {
-      const upstreamRes = await fetch(tool.baseUrl + request.path, {
-        method: request.method,
-        signal: AbortSignal.timeout(tool.timeoutMs),
-      });
+      const response = await this.upstream.send(
+        tool.baseUrl + request.path,
+        request.method,
+        tool.timeoutMs,
+      );
 
       result = {
-        status: upstreamRes.status,
-        contentType: upstreamRes.headers.get('content-type') ?? 'text/plain',
-        body: await upstreamRes.text(),
+        status: response.status,
+        contentType: response.contentType,
+        body: response.body,
         durationMs: Date.now() - startedAt,
       };
     } catch {

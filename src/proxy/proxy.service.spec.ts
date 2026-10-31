@@ -2,9 +2,9 @@ import type { FaultOutcome, FaultPlugin } from '../faults/fault.js';
 import type { FaultRule } from '../faults/fault-planner.js';
 import type { FaultRegistry } from '../faults/fault-registry.js';
 import type { TraceRecorder } from '../traces/trace.recorder.js';
-import { ProxyService } from './proxy.service.js';
+import { ProxyService, type ProxyRequest } from './proxy.service.js';
 import type { RunInfo, TargetProvider, ToolInfo } from './target.provider.js';
-import type { UpstreamClient } from './upstream.client.js';
+import { UpstreamError, type UpstreamClient } from './upstream.client.js';
 
 const RUN_ID = '00000000-0000-7000-8000-000000000001';
 
@@ -15,13 +15,30 @@ const runningRun: RunInfo = {
   seed: 42,
   faultRules: [],
 };
+
 const todosTool: ToolInfo = {
   id: 'tool-1',
   baseUrl: 'http://upstream.test',
   timeoutMs: 1000,
 };
 
-// A rule that always fires on the todos tool.
+const okResponse = {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+  body: '{"id":1}',
+  durationMs: 7,
+};
+
+const getTodo: ProxyRequest = {
+  runId: RUN_ID,
+  toolSlug: 'todos',
+  method: 'GET',
+  path: '/todos/1',
+  query: 'expand=true',
+  headers: { authorization: 'Bearer secret' },
+  body: null,
+};
+
 function alwaysRule(type: string): FaultRule {
   return {
     id: `always-${type}`,
@@ -32,19 +49,11 @@ function alwaysRule(type: string): FaultRule {
   };
 }
 
-// A fake card that records being applied and returns a fixed outcome.
 function fakeCard(type: string, outcome: FaultOutcome) {
   const apply = vi.fn().mockResolvedValue(outcome);
   return { card: { type, apply } as FaultPlugin, apply };
 }
 
-const okResponse = {
-  status: 200,
-  contentType: 'application/json',
-  body: '{"id":1}',
-};
-
-// Fake helpers: each one is a plain object with the methods ProxyService uses.
 function makeService(options: {
   run?: RunInfo | null;
   tool?: ToolInfo | null;
@@ -73,13 +82,6 @@ function makeService(options: {
     record,
   };
 }
-
-const getTodo = {
-  runId: RUN_ID,
-  toolSlug: 'todos',
-  method: 'GET',
-  path: '/todos/1',
-};
 
 describe('ProxyService', () => {
   it('returns 404 when the run does not exist', async () => {
@@ -112,7 +114,7 @@ describe('ProxyService', () => {
     expect(record).not.toHaveBeenCalled();
   });
 
-  it("forwards to the tool's base URL and records a trace", async () => {
+  it('forwards the full request to the tool and records a trace', async () => {
     const { service, send, record } = makeService({
       run: runningRun,
       tool: todosTool,
@@ -120,27 +122,32 @@ describe('ProxyService', () => {
 
     const result = await service.forward(getTodo);
 
-    expect(send).toHaveBeenCalledWith(
-      'http://upstream.test/todos/1',
-      'GET',
-      1000,
-    );
+    expect(send).toHaveBeenCalledWith({
+      url: 'http://upstream.test/todos/1?expand=true',
+      method: 'GET',
+      headers: { authorization: 'Bearer secret' },
+      body: null,
+      timeoutMs: 1000,
+    });
     expect(result.status).toBe(200);
     expect(result.body).toBe('{"id":1}');
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({
-        runId: RUN_ID,
-        toolId: 'tool-1',
         sequence: 1,
         path: '/todos/1',
+        query: 'expand=true',
         responseStatus: 200,
+        upstreamDurationMs: 7,
+        errorCode: null,
         faults: [],
       }),
     );
   });
 
-  it('returns 502 when the upstream is unreachable', async () => {
-    const send = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+  it('returns 502 when the tool cannot be reached', async () => {
+    const send = vi
+      .fn()
+      .mockRejectedValue(new UpstreamError('UPSTREAM_UNREACHABLE'));
     const { service, record } = makeService({
       run: runningRun,
       tool: todosTool,
@@ -150,10 +157,25 @@ describe('ProxyService', () => {
     const result = await service.forward(getTodo);
 
     expect(result.status).toBe(502);
-    expect(JSON.parse(result.body)).toEqual({ error: 'UPSTREAM_UNREACHABLE' });
     expect(record).toHaveBeenCalledWith(
-      expect.objectContaining({ responseStatus: 502 }),
+      expect.objectContaining({
+        responseStatus: 502,
+        errorCode: 'UPSTREAM_UNREACHABLE',
+        upstreamDurationMs: null,
+      }),
     );
+  });
+
+  it('returns 504 when the tool does not answer in time', async () => {
+    const send = vi
+      .fn()
+      .mockRejectedValue(new UpstreamError('UPSTREAM_TIMEOUT'));
+    const { service } = makeService({ run: runningRun, tool: todosTool, send });
+
+    const result = await service.forward(getTodo);
+
+    expect(result.status).toBe(504);
+    expect(JSON.parse(result.body)).toEqual({ error: 'UPSTREAM_TIMEOUT' });
   });
 
   it('applies a "continue" card, then still forwards', async () => {
@@ -180,7 +202,7 @@ describe('ProxyService', () => {
     const { card } = fakeCard('broken', {
       kind: 'respond',
       status: 503,
-      body: '{"error":"SERVICE_UNAVAILABLE"}',
+      body: '{"error":"HTTP 503"}',
     });
     const { service, send, record } = makeService({
       run: { ...runningRun, faultRules: [alwaysRule('broken')] },
@@ -195,6 +217,7 @@ describe('ProxyService', () => {
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({
         responseStatus: 503,
+        upstreamDurationMs: null,
         faults: [expect.objectContaining({ type: 'broken' })],
       }),
     );

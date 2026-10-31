@@ -1,5 +1,6 @@
 import type { PrismaService } from '../common/prisma/prisma.service.js';
 import { ProxyService } from './proxy.service.js';
+import { UpstreamClient } from './upstream.client.js';
 
 const RUN_ID = '00000000-0000-7000-8000-000000000001';
 
@@ -15,6 +16,10 @@ function fakePrisma(options: { run?: unknown; tool?: unknown }) {
   } as unknown as PrismaService;
 }
 
+function makeService(options: { run?: unknown; tool?: unknown }) {
+  return new ProxyService(fakePrisma(options), new UpstreamClient());
+}
+
 const runningRun = { status: 'RUNNING', scenario: { projectId: 'project-1' } };
 const todosTool = { baseUrl: 'http://upstream.test', timeoutMs: 1000 };
 
@@ -24,7 +29,7 @@ describe('ProxyService', () => {
   });
 
   it('returns 404 when the run does not exist', async () => {
-    const service = new ProxyService(fakePrisma({ run: null }));
+    const service = makeService({ run: null });
 
     const result = await service.forward({
       runId: RUN_ID,
@@ -39,7 +44,7 @@ describe('ProxyService', () => {
 
   it('returns 409 when the run is not running', async () => {
     const finishedRun = { ...runningRun, status: 'COMPLETED' };
-    const service = new ProxyService(fakePrisma({ run: finishedRun }));
+    const service = makeService({ run: finishedRun });
 
     const result = await service.forward({
       runId: RUN_ID,
@@ -53,9 +58,7 @@ describe('ProxyService', () => {
   });
 
   it('returns 404 when the tool does not exist', async () => {
-    const service = new ProxyService(
-      fakePrisma({ run: runningRun, tool: null }),
-    );
+    const service = makeService({ run: runningRun, tool: null });
 
     const result = await service.forward({
       runId: RUN_ID,
@@ -76,9 +79,7 @@ describe('ProxyService', () => {
       }),
     );
     vi.stubGlobal('fetch', fetchMock);
-    const service = new ProxyService(
-      fakePrisma({ run: runningRun, tool: todosTool }),
-    );
+    const service = makeService({ run: runningRun, tool: todosTool });
 
     const result = await service.forward({
       runId: RUN_ID,
@@ -100,9 +101,7 @@ describe('ProxyService', () => {
       'fetch',
       vi.fn().mockRejectedValue(new Error('ECONNREFUSED')),
     );
-    const service = new ProxyService(
-      fakePrisma({ run: runningRun, tool: todosTool }),
-    );
+    const service = makeService({ run: runningRun, tool: todosTool });
 
     const result = await service.forward({
       runId: RUN_ID,

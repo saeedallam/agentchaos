@@ -12,21 +12,31 @@ const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString }),
 });
 
-// ---------- The demo data ----------
-// A fixed run id, so the proxy URL is the same every time.
-const DEMO_RUN_ID = '00000000-0000-7000-8000-000000000001';
+// ---------- The demo scenarios ----------
+// Each one gets a run with a fixed id, so its proxy URL never changes:
+// http://localhost:3000/proxy/<runId>/todos/todos/1
+interface DemoScenario {
+  name: string;
+  runId: string;
+  sourceYaml: string;
+  definition: { version: number; name: string; seed: number; faults: object[] };
+}
 
-const sourceYaml = `version: 1
+const demoScenarios: DemoScenario[] = [
+  {
+    name: 'no-faults',
+    runId: '00000000-0000-7000-8000-000000000001',
+    sourceYaml: `version: 1
 name: no-faults
 seed: 42
 faults: []
-`;
-const definition = { version: 1, name: 'no-faults', seed: 42, faults: [] };
-
-// A second run whose scenario slows down half of the todos requests.
-const SLOW_RUN_ID = '00000000-0000-7000-8000-000000000002';
-
-const slowSourceYaml = `version: 1
+`,
+    definition: { version: 1, name: 'no-faults', seed: 42, faults: [] },
+  },
+  {
+    name: 'slow-todos',
+    runId: '00000000-0000-7000-8000-000000000002',
+    sourceYaml: `version: 1
 name: slow-todos
 seed: 42
 faults:
@@ -35,21 +45,51 @@ faults:
     target: { tool: todos, path: "/todos*" }
     probability: 0.5
     config: { delayMs: 2000 }
-`;
-const slowDefinition = {
-  version: 1,
-  name: 'slow-todos',
-  seed: 42,
-  faults: [
-    {
-      id: 'slow-todos',
-      type: 'latency',
-      target: { tool: 'todos', path: '/todos*' },
-      probability: 0.5,
-      config: { delayMs: 2000 },
+`,
+    definition: {
+      version: 1,
+      name: 'slow-todos',
+      seed: 42,
+      faults: [
+        {
+          id: 'slow-todos',
+          type: 'latency',
+          target: { tool: 'todos', path: '/todos*' },
+          probability: 0.5,
+          config: { delayMs: 2000 },
+        },
+      ],
     },
-  ],
-};
+  },
+  {
+    name: 'flaky-todos',
+    runId: '00000000-0000-7000-8000-000000000003',
+    sourceYaml: `version: 1
+name: flaky-todos
+seed: 42
+faults:
+  - id: flaky-todos
+    type: http_error
+    target: { tool: todos }
+    probability: 0.3
+    config: { status: 503 }
+`,
+    definition: {
+      version: 1,
+      name: 'flaky-todos',
+      seed: 42,
+      faults: [
+        {
+          id: 'flaky-todos',
+          type: 'http_error',
+          target: { tool: 'todos' },
+          probability: 0.3,
+          config: { status: 503 },
+        },
+      ],
+    },
+  },
+];
 
 async function main() {
   // 1) Project
@@ -59,91 +99,57 @@ async function main() {
     create: { slug: 'demo', name: 'Demo project' },
   });
 
-  // 2) Tool: points to the fake upstream
-  const tool = await prisma.tool.upsert({
-    where: { projectId_slug: { projectId: project.id, slug: 'todos' } },
-    update: {},
-    create: {
-      projectId: project.id,
-      slug: 'todos',
-      baseUrl: 'http://localhost:5000',
-    },
-  });
+  // 2) Tools: both point to the fake upstream
+  for (const slug of ['todos', 'email']) {
+    await prisma.tool.upsert({
+      where: { projectId_slug: { projectId: project.id, slug } },
+      update: {},
+      create: {
+        projectId: project.id,
+        slug,
+        baseUrl: 'http://localhost:5000',
+      },
+    });
+  }
 
-  // Second tool, also pointing to the fake upstream
-  await prisma.tool.upsert({
-    where: { projectId_slug: { projectId: project.id, slug: 'email' } },
-    update: {},
-    create: {
-      projectId: project.id,
-      slug: 'email',
-      baseUrl: 'http://localhost:5000',
-    },
-  });
+  // 3) One scenario and one running run per demo scenario
+  for (const demo of demoScenarios) {
+    const scenario = await prisma.scenario.upsert({
+      where: { projectId_name: { projectId: project.id, name: demo.name } },
+      update: {},
+      create: {
+        projectId: project.id,
+        name: demo.name,
+        sourceYaml: demo.sourceYaml,
+        definition: demo.definition,
+        checksum: createHash('sha256').update(demo.sourceYaml).digest('hex'),
+      },
+    });
 
-  // 3) Scenario: no faults yet
-  const scenario = await prisma.scenario.upsert({
-    where: { projectId_name: { projectId: project.id, name: 'no-faults' } },
-    update: {},
-    create: {
-      projectId: project.id,
-      name: 'no-faults',
-      sourceYaml,
-      definition,
-      checksum: createHash('sha256').update(sourceYaml).digest('hex'),
-    },
-  });
+    await prisma.run.upsert({
+      where: { id: demo.runId },
+      update: { status: 'RUNNING' },
+      create: {
+        id: demo.runId,
+        scenarioId: scenario.id,
+        status: 'RUNNING',
+        seed: demo.definition.seed,
+        scenarioSnapshot: demo.definition,
+        startedAt: new Date(),
+      },
+    });
+  }
 
-  // 4) Run: already running, ready to receive requests
-  await prisma.run.upsert({
-    where: { id: DEMO_RUN_ID },
-    update: { status: 'RUNNING' },
-    create: {
-      id: DEMO_RUN_ID,
-      scenarioId: scenario.id,
-      status: 'RUNNING',
-      seed: 42,
-      scenarioSnapshot: definition,
-      startedAt: new Date(),
-    },
-  });
-
-  // 5) Second scenario and run: half of the todos requests are slow
-  const slowScenario = await prisma.scenario.upsert({
-    where: { projectId_name: { projectId: project.id, name: 'slow-todos' } },
-    update: {},
-    create: {
-      projectId: project.id,
-      name: 'slow-todos',
-      sourceYaml: slowSourceYaml,
-      definition: slowDefinition,
-      checksum: createHash('sha256').update(slowSourceYaml).digest('hex'),
-    },
-  });
-
-  await prisma.run.upsert({
-    where: { id: SLOW_RUN_ID },
-    update: { status: 'RUNNING' },
-    create: {
-      id: SLOW_RUN_ID,
-      scenarioId: slowScenario.id,
-      status: 'RUNNING',
-      seed: 42,
-      scenarioSnapshot: slowDefinition,
-      startedAt: new Date(),
-    },
-  });
-
-  // 6) Start both demo runs from request number 1 again, so the seeded
+  // 4) Start every demo run from request number 1 again, so the seeded
   // fault pattern is the same every time you seed.
   await prisma.trace.deleteMany({
-    where: { runId: { in: [DEMO_RUN_ID, SLOW_RUN_ID] } },
+    where: { runId: { in: demoScenarios.map((demo) => demo.runId) } },
   });
 
-  console.log(
-    `Seeded: project "${project.slug}", tool "${tool.slug}", run ${DEMO_RUN_ID}`,
-  );
-  console.log(`Seeded: slow run ${SLOW_RUN_ID} (seed 42, latency on /todos*)`);
+  console.log(`Seeded project "${project.slug}" with tools todos and email:`);
+  for (const demo of demoScenarios) {
+    console.log(`  ${demo.runId}  ${demo.name}`);
+  }
 }
 
 try {

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { FaultPlugin } from './fault.js';
+import { HttpErrorFault } from './http-error.fault.js';
 import { LatencyFault } from './latency.fault.js';
 
 @Injectable()
@@ -8,6 +9,7 @@ export class FaultRegistry {
 
   constructor() {
     this.register(new LatencyFault());
+    this.register(new HttpErrorFault());
   }
 
   register(plugin: FaultPlugin) {

@@ -1,6 +1,5 @@
 import type { FaultOutcome, FaultPlugin } from './fault.js';
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+import { sleep } from './sleep.js';
 
 export class LatencyFault implements FaultPlugin {
   readonly type = 'latency';

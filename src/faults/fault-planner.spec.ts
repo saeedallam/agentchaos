@@ -50,7 +50,6 @@ const request: PlanContext = {
   sequence: 1,
 };
 
-// How many of the first `count` requests get the rule.
 function countHits(rule: FaultRule, seed: number, count: number): number {
   let hits = 0;
   for (let sequence = 1; sequence <= count; sequence++) {

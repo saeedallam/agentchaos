@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../src/generated/prisma/client.js';
 
-// ---------- Connect to the database ----------
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error('DATABASE_URL is not set. Copy .env.example to .env.');
@@ -12,9 +11,6 @@ const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString }),
 });
 
-// ---------- The demo scenarios ----------
-// Each one gets a run with a fixed id, so its proxy URL never changes:
-// http://localhost:3000/proxy/<runId>/todos/todos/1
 interface DemoScenario {
   name: string;
   runId: string;
@@ -89,17 +85,43 @@ faults:
       ],
     },
   },
+  {
+    name: 'hanging-todos',
+    runId: '00000000-0000-7000-8000-000000000004',
+    sourceYaml: `version: 1
+name: hanging-todos
+seed: 42
+faults:
+  - id: hanging-todos
+    type: timeout
+    target: { tool: todos }
+    probability: 0.3
+    config: { afterMs: 3000 }
+`,
+    definition: {
+      version: 1,
+      name: 'hanging-todos',
+      seed: 42,
+      faults: [
+        {
+          id: 'hanging-todos',
+          type: 'timeout',
+          target: { tool: 'todos' },
+          probability: 0.3,
+          config: { afterMs: 3000 },
+        },
+      ],
+    },
+  },
 ];
 
 async function main() {
-  // 1) Project
   const project = await prisma.project.upsert({
     where: { slug: 'demo' },
     update: {},
     create: { slug: 'demo', name: 'Demo project' },
   });
 
-  // 2) Tools: both point to the fake upstream
   for (const slug of ['todos', 'email']) {
     await prisma.tool.upsert({
       where: { projectId_slug: { projectId: project.id, slug } },
@@ -112,7 +134,6 @@ async function main() {
     });
   }
 
-  // 3) One scenario and one running run per demo scenario
   for (const demo of demoScenarios) {
     const scenario = await prisma.scenario.upsert({
       where: { projectId_name: { projectId: project.id, name: demo.name } },
@@ -140,8 +161,6 @@ async function main() {
     });
   }
 
-  // 4) Start every demo run from request number 1 again, so the seeded
-  // fault pattern is the same every time you seed.
   await prisma.trace.deleteMany({
     where: { runId: { in: demoScenarios.map((demo) => demo.runId) } },
   });

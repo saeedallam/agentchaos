@@ -1,10 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma/prisma.service.js';
+import type { FaultRule } from '../faults/fault-planner.js';
 
 export interface RunInfo {
   id: string;
   status: string;
   projectId: string;
+  seed: number;
+  faultRules: FaultRule[];
 }
 
 export interface ToolInfo {
@@ -32,6 +35,8 @@ export class TargetProvider {
       id: run.id,
       status: run.status,
       projectId: run.scenario.projectId,
+      seed: run.seed,
+      faultRules: faultRulesFrom(run.scenarioSnapshot),
     };
   }
 
@@ -45,4 +50,18 @@ export class TargetProvider {
 
     return { id: tool.id, baseUrl: tool.baseUrl, timeoutMs: tool.timeoutMs };
   }
+}
+
+// The run's scenario snapshot is stored as JSON. Until scenario validation
+// exists (YAML step), trust its "faults" array and ignore anything else.
+function faultRulesFrom(snapshot: unknown): FaultRule[] {
+  if (
+    typeof snapshot === 'object' &&
+    snapshot !== null &&
+    'faults' in snapshot &&
+    Array.isArray(snapshot.faults)
+  ) {
+    return snapshot.faults as FaultRule[];
+  }
+  return [];
 }

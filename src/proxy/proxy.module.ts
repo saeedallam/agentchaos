@@ -1,10 +1,13 @@
 import { Module } from '@nestjs/common';
+import { TracesModule } from '../traces/traces.module.js';
 import { ProxyController } from './proxy.controller.js';
 import { ProxyService } from './proxy.service.js';
+import { TargetProvider } from './target.provider.js';
 import { UpstreamClient } from './upstream.client.js';
 
 @Module({
+  imports: [TracesModule],
   controllers: [ProxyController],
-  providers: [ProxyService, UpstreamClient],
+  providers: [ProxyService, TargetProvider, UpstreamClient],
 })
 export class ProxyModule {}

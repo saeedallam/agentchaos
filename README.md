@@ -2,110 +2,153 @@
 
 Chaos testing for AI agents.
 
-AgentChaos sits as a proxy between an AI agent and the tools it calls
-(HTTP APIs, and later MCP servers). It forwards each call to the real
-tool, injects faults defined in a YAML scenario, records every call as a
-trace, and scores how the agent behaved.
+AgentChaos sits as a proxy between an AI agent and the tools it calls. It
+forwards each call to the real tool, injects faults defined in a YAML
+scenario, and records every call as a trace. Later phases add scoring of the
+agent's behavior.
 
-> Status: early development. Phase 1 (HTTP proxy, first faults, YAML
-> scenarios) is in progress. Nothing here is stable yet.
+> Status: phase 1 (HTTP proxy, faults, YAML scenarios, traces) is complete.
+> The API may still change.
 
 ## Why
 
 Agents look great in demos, where every tool answers instantly and
-correctly. In production, APIs time out, rate limit, and return broken
-data. AgentChaos answers the question nobody tests: what does your agent
-do when its tools fail?
-
-- Does it retry sensibly, or give up, or retry forever?
-- Does it get stuck in a loop?
-- How many calls and tokens does it burn?
-- Does it claim success when it actually failed?
-- Does it obey instructions injected into tool output?
+correctly. In production, APIs slow down, rate limit and time out.
+AgentChaos answers the question nobody tests: what does your agent do when
+its tools fail?
 
 ## How it works
 
 ```
-Agent  -->  AgentChaos proxy  -->  Real tool
-                 |
-                 +-- injects faults from a YAML scenario
-                 +-- records every call as a trace (PostgreSQL)
+Agent  ──>  AgentChaos  ──>  Real tool
+              │
+              ├─ plans faults from the scenario (seeded, repeatable)
+              ├─ applies them: delay, error status, or timeout
+              └─ records a trace for every call, secrets redacted
 ```
 
-A scenario looks like this (the format is still evolving):
+Point your agent's tool base URL at the proxy instead of the real tool:
+
+```
+before:  https://api.weather.com/forecast
+after:   http://localhost:3000/proxy/<runId>/weather/forecast
+```
+
+Nothing else in the agent changes.
+
+## Faults
+
+| Type         | What happens                              | Config            |
+| ------------ | ----------------------------------------- | ----------------- |
+| `latency`    | Waits, then calls the real tool           | `delayMs` (1000)  |
+| `http_error` | Answers with an error, tool is not called | `status` (503)    |
+| `timeout`    | Waits, then answers 504, tool not called  | `afterMs` (30000) |
+
+## Scenarios
 
 ```yaml
 version: 1
 name: flaky-weather
-seed: 42 # same seed = same faults in the same places
+seed: 42 # same seed = same faults on the same requests
 
 faults:
   - id: slow-forecast
     type: latency
-    target: { tool: weather, path: '/forecast*' }
-    probability: 0.5
+    target: { tool: weather, path: '/forecast*' } # * matches any ending
+    probability: 0.5 # 0 = never, 1 = always (default 1)
     config: { delayMs: 2000 }
 
   - id: rate-limited
     type: http_error
-    target: { tool: weather }
+    target: { tool: weather } # no path = every path of this tool
     probability: 0.2
     config: { status: 429 }
 ```
 
-## Getting started (development)
+Whether a fault fires is decided by the run's seed, the request number and
+the fault id, so a run can be replayed exactly.
 
-Requirements:
+## Getting started
 
-- Node.js 22.12 or newer
-- npm 11 or newer (npm 10.9 crashes while installing, see
-  [ADR 0001](docs/adr/0001-use-esm-and-vitest.md))
-- Docker with Docker Compose
+Requirements: Node.js 22.12+, npm 11+ (npm 10.9 crashes while installing, see
+[ADR 0001](docs/adr/0001-use-esm-and-vitest.md)), Docker with Compose.
 
 ```bash
-# 1. Install dependencies (also generates the Prisma client)
-npm install
-
-# 2. Create your local environment file
+npm install                # also generates the Prisma client
 cp .env.example .env
-
-# 3. Start PostgreSQL (runs on 127.0.0.1:5433)
-docker compose up -d
-
-# 4. Apply database migrations
+docker compose up -d       # PostgreSQL on 127.0.0.1:5433
 npm run db:migrate
-
-# 5. Start the app in watch mode
 npm run start:dev
 ```
 
-Check that the app and the database are up:
+## Usage
 
 ```bash
-curl http://localhost:3000/health
-# {"status":"ok","database":"up"}
+# 1. A project and the tools your agent calls
+curl -X PUT localhost:3000/projects/my-agent \
+  -H 'content-type: application/json' -d '{"name":"My agent"}'
+curl -X PUT localhost:3000/projects/my-agent/tools/weather \
+  -H 'content-type: application/json' \
+  -d '{"baseUrl":"https://api.weather.com"}'
+
+# 2. A scenario
+curl -X POST localhost:3000/projects/my-agent/scenarios \
+  -H 'content-type: text/yaml' --data-binary @flaky-weather.yaml
+
+# 3. A run (returns its id and proxy URL)
+curl -X POST localhost:3000/projects/my-agent/scenarios/flaky-weather/runs
+
+# 4. Point the agent at http://localhost:3000/proxy/<runId>/weather and run it
+
+# 5. Read what happened, then close the run
+curl localhost:3000/runs/<runId>/traces
+curl -X POST localhost:3000/runs/<runId>/complete
 ```
 
-## Useful scripts
+Invalid scenarios are rejected with every problem listed:
 
-| Script                | What it does                                 |
-| --------------------- | -------------------------------------------- |
-| `npm run start:dev`   | Start the app and restart on file changes    |
-| `npm run db:migrate`  | Create and apply database migrations         |
-| `npm run db:generate` | Regenerate the Prisma client                 |
-| `npm test`            | Run unit tests (Vitest)                      |
-| `npm run test:e2e`    | Run end-to-end tests (needs the database up) |
-| `npm run lint`        | Lint the code (oxlint)                       |
-| `npm run format`      | Format the code (Prettier)                   |
+```json
+{
+  "error": "INVALID_INPUT",
+  "issues": [
+    {
+      "path": "faults.0.probability",
+      "message": "Too big: expected number to be <=1"
+    }
+  ]
+}
+```
 
-## Tech stack
+### Demo data
 
-NestJS 12, TypeScript (ESM), PostgreSQL 18, Prisma 7, Vitest, Docker
-Compose. Redis and BullMQ will be added for background runs.
+`npm run db:seed` creates a `demo` project with four running runs against a
+fake upstream on `http://localhost:5000`: `...0001` (no faults), `...0002`
+(latency), `...0003` (http_error) and `...0004` (timeout). Seeding resets
+their traces, so the fault pattern is the same every time.
 
-## Architecture decisions
+## Scripts
 
-Important decisions are recorded as ADRs in [`docs/adr`](docs/adr).
+| Script               | What it does                               |
+| -------------------- | ------------------------------------------ |
+| `npm run start:dev`  | Start the app and restart on file changes  |
+| `npm test`           | Unit tests                                 |
+| `npm run test:e2e`   | End-to-end tests (needs the database)      |
+| `npm run lint`       | Lint (oxlint)                              |
+| `npm run typecheck`  | Type check                                 |
+| `npm run format`     | Format (Prettier)                          |
+| `npm run db:migrate` | Create and apply migrations in development |
+| `npm run db:deploy`  | Apply migrations (CI and production)       |
+| `npm run db:seed`    | Load the demo data                         |
+
+CI runs all checks and the end-to-end tests against PostgreSQL on every pull
+request.
+
+## Architecture
+
+Decisions are recorded in [`docs/adr`](docs/adr). In short: the controller
+translates HTTP, `ProxyService` orchestrates, fault planning and trace
+redaction are pure functions, and database and network access live in small
+infrastructure classes.
 
 ## License
 

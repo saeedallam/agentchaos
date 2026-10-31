@@ -14,6 +14,7 @@ npm install          # also runs `prisma generate`
 cp .env.example .env
 docker compose up -d # PostgreSQL on 127.0.0.1:5433
 npm run db:migrate
+npm run db:seed      # optional demo data
 ```
 
 ## Conventions
@@ -28,20 +29,28 @@ npm run db:migrate
 - Database changes go through `prisma/schema.prisma` and a new migration
   (`npm run db:migrate -- --name <change>`). Never edit an applied
   migration.
-- Faults and evaluators are plugins (Strategy pattern). Adding a new type
-  must not require changes to the core or the database schema. That is
-  why `fault_type` is a string column, not an enum.
+- Faults and evaluators are plugins (Strategy pattern). A fault is a class
+  implementing `FaultPlugin` in `src/faults`, registered in
+  `FaultRegistry`. Adding one must not require changes to `ProxyService`
+  or the database schema. That is why `fault_type` is a string column.
+- Keep rules in pure functions with no NestJS or Prisma imports
+  (`src/faults/fault-planner.ts`, `src/scenarios/scenario.ts`,
+  `src/traces/trace-policy.ts`). See ADR 0003 and ADR 0004.
+- Validate input with zod (`src/common/validation.ts`).
 - Never store secrets. Redact `Authorization`, cookies and API keys from
   traces before writing them.
 - No floating promises: always `await` or explicitly handle a promise.
   The linter enforces this.
-- Code comments and docs are in English.
+- Prefer clear names over code comments. Docs are in English.
 
 ## Checks before committing
 
 ```bash
+npm run format:check
 npm run lint
+npm run typecheck
 npm test
+npm run test:e2e   # needs the database
 ```
 
 ## Commits
